@@ -1,5 +1,9 @@
+#include <filesystem>
+
 #include <CLI/CLI.hpp>
 #include <fmt/core.h>
+
+namespace fs = std::filesystem;
 
 struct LsOptions {
   bool all = false;                 // -a
@@ -7,6 +11,47 @@ struct LsOptions {
   bool recursive = false;           // -R
   std::vector<std::string> targets; // ls <targets>
 };
+
+void list_directory(const fs::path& path, const LsOptions& opts) {
+  std::error_code ec;
+  if (!fs::exists(path, ec)) {
+    fmt::println("ls: {}: No such file or directory", path.string());
+    return;
+  }
+
+  if (fs::is_regular_file(path, ec)) {
+    fmt::println("{}", path.filename().string());
+    return;
+  }
+
+  // iterate directory
+  std::vector<fs::path> entries;
+
+  try {
+    for (const auto& entry : fs::directory_iterator(path)) {
+      std::string filename = entry.path().filename();
+
+      if (!opts.all && filename.starts_with(".")) {
+        // ignore hidden file
+        continue;
+      }
+
+      entries.push_back(entry.path());
+    }
+  } catch (const fs::filesystem_error& err) {
+    fmt::println(stdout, "ls: cannot open directory {}", path.string());
+    return;
+  }
+
+  // print entries
+  // by default, ls sorts file by name
+  std::sort(entries.begin(), entries.end());
+
+  for (const auto& entry : entries) {
+    // TODO: list files in grid layout
+    fmt::println("{}", entry.filename().string());
+  }
+}
 
 int main(int argc, char** argv) {
   // initialize CLI11 app
@@ -29,14 +74,19 @@ int main(int argc, char** argv) {
     opts.targets.push_back(".");
   }
 
-  // print parsing result
-  fmt::print("(-a): {}\n", opts.all);
-  fmt::print("(-l): {}\n", opts.long_fmt);
-  fmt::print("(-R): {}\n", opts.recursive);
-  fmt::print("# files: {}\n", opts.targets.size());
+  bool multi_target = opts.targets.size() > 1;
 
   for (const auto& target : opts.targets) {
-    fmt::print("\t-> {}\n", target);
+    if (multi_target) {
+      fmt::println("{}:", target);
+    }
+
+    list_directory(target, opts);
+
+    // TODO: remove extra last line
+    if (multi_target) {
+      fmt::println("");
+    }
   }
 
   return 0;
