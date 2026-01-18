@@ -2,7 +2,9 @@
 #include <filesystem>
 #include <grp.h>
 #include <pwd.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <CLI/CLI.hpp>
 #include <fmt/core.h>
@@ -82,14 +84,50 @@ std::string format_perms(fs::perms perms, bool is_directory) {
   return str;
 }
 
-void print_file_infos(std::vector<struct FileInfo> &infos, bool long_fmt) {
-  if (!long_fmt) {
-    for (const auto &info : infos) {
-      fmt::println("{}", info.filename);
+void print_grid(std::vector<std::string> &filenames) {
+  if (filenames.empty())
+    return;
+
+  struct winsize w;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) {
+    w.ws_col = 80;
+  }
+
+  if (!isatty(STDOUT_FILENO)) {
+    // ls | cat (pipe)
+    for (const auto &filename : filenames) {
+      fmt::println("{}", filename);
     }
     return;
   }
 
+  size_t max_len = 0;
+  for (const auto &filename : filenames) {
+    max_len = std::max(max_len, filename.size());
+  }
+
+  size_t col_width = max_len + 3;
+  size_t num_cols = w.ws_col / col_width;
+  if (num_cols == 0) {
+    num_cols = 1;
+  }
+
+  size_t num_rows = (filenames.size() + num_cols - 1) / num_cols;
+
+  for (size_t row = 0; row < num_rows; row++) {
+    for (size_t col = 0; col < num_cols; col++) {
+      // col major
+      size_t index = col * num_rows + row;
+
+      if (index < filenames.size()) {
+        fmt::print("{:<{}}", filenames[index], col_width);
+      }
+    }
+    fmt::print("\n");
+  }
+}
+
+void print_longfmt(std::vector<struct FileInfo> &infos) {
   // calculate width
   size_t nlink_width = 0;
   size_t owner_width = 0;
@@ -150,50 +188,68 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
 
   // print entries
   // by default, ls sorts file by name
-  std::sort(entries.begin(), entries.end(), [](const fs::path& a, const fs::path& b) {
-    return strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
-  });
+  std::sort(entries.begin(), entries.end(),
+            [](const fs::path &a, const fs::path &b) {
+              return strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
+            });
 
+  if (!opts.long_fmt) {
+    // short format
+    std::vector<std::string> filenames;
+    filenames.reserve(entries.size());
+
+    for (const auto &entry : entries) {
+      filenames.push_back(entry.filename().string());
+    }
+
+    return print_grid(filenames);
+  }
+
+  // long format
   std::vector<struct FileInfo> file_infos(entries.size());
 
   // fill in file info
+  size_t total_blocks = 0;
   for (int i = 0; i < entries.size(); i++) {
     fs::path entry = entries[i];
     struct FileInfo &info = file_infos[i];
 
-    // TODO: list files in grid layout
+    // get file stat
     info.filename = entry.filename();
-    if (opts.long_fmt) {
-      struct stat stat;
-      if (lstat(entry.string().c_str(), &stat) == -1) {
-        perror("lstat");
-        continue;
-      }
-
-      info.is_directory = S_ISDIR(stat.st_mode);
-      info.perms = static_cast<fs::perms>(stat.st_mode);
-
-      info.nlink = stat.st_nlink;
-      info.uid = stat.st_uid;
-      info.gid = stat.st_gid;
-      info.size = stat.st_size;
-      info.date_str = format_time(stat.st_mtime);
-
-      if (user_cache.find(info.uid) == user_cache.end()) {
-        struct passwd *pw = getpwuid(info.uid);
-        user_cache[info.uid] = pw ? pw->pw_name : std::to_string(info.uid);
-      }
-      info.owner_name = user_cache[info.uid];
-
-      if (group_cache.find(info.gid) == group_cache.end()) {
-        struct group *gr = getgrgid(info.gid);
-        group_cache[info.gid] = gr ? gr->gr_name : std::to_string(info.gid);
-      }
-      info.group_name = group_cache[info.gid];
+    struct stat stat;
+    if (lstat(entry.string().c_str(), &stat) == -1) {
+      perror("lstat");
+      continue;
     }
+
+    info.is_directory = S_ISDIR(stat.st_mode);
+    info.perms = static_cast<fs::perms>(stat.st_mode);
+
+    info.nlink = stat.st_nlink;
+    info.uid = stat.st_uid;
+    info.gid = stat.st_gid;
+    info.size = stat.st_size;
+    info.date_str = format_time(stat.st_mtime);
+
+    // owner name
+    if (user_cache.find(info.uid) == user_cache.end()) {
+      struct passwd *pw = getpwuid(info.uid);
+      user_cache[info.uid] = pw ? pw->pw_name : std::to_string(info.uid);
+    }
+    info.owner_name = user_cache[info.uid];
+
+    // group name
+    if (group_cache.find(info.gid) == group_cache.end()) {
+      struct group *gr = getgrgid(info.gid);
+      group_cache[info.gid] = gr ? gr->gr_name : std::to_string(info.gid);
+    }
+    info.group_name = group_cache[info.gid];
+
+    total_blocks += stat.st_blocks;
   }
 
-  print_file_infos(file_infos, opts.long_fmt);
+  fmt::println("total {}", total_blocks);
+  print_longfmt(file_infos);
 }
 
 int main(int argc, char **argv) {
