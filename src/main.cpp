@@ -127,6 +127,11 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
   // iterate directory
   std::vector<fs::path> entries;
 
+  if (opts.all) {
+    entries.push_back(".");
+    entries.push_back("..");
+  }
+
   try {
     for (const auto &entry : fs::directory_iterator(path)) {
       std::string filename = entry.path().filename();
