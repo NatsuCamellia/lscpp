@@ -145,7 +145,9 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
 
   // print entries
   // by default, ls sorts file by name
-  std::sort(entries.begin(), entries.end());
+  std::sort(entries.begin(), entries.end(), [](const fs::path& a, const fs::path& b) {
+    return strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
+  });
 
   std::vector<struct FileInfo> file_infos(entries.size());
 
@@ -190,6 +192,9 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
 }
 
 int main(int argc, char **argv) {
+  // initialize locale for filename sorting with strcoll
+  std::setlocale(LC_ALL, "");
+
   // initialize CLI11 app
   CLI::App app{"ls rewritten in C++", "lscpp"};
   // convert argv to UTF-8 encoding, only on Windows
