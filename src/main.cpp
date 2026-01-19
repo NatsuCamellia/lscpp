@@ -15,6 +15,8 @@ struct LsOptions {
   bool all = false;                 // -a
   bool long_fmt = false;            // -l
   bool recursive = false;           // -R
+  bool sort_time = false;           // -t
+  bool reverse = false;             // -r
   std::vector<std::string> targets; // ls <targets>
 };
 
@@ -27,6 +29,8 @@ struct FileInfo {
   gid_t gid;
   std::string group_name;
   size_t size;
+  blkcnt_t blocks;
+  time_t mtime;
   std::string date_str;
   std::string filename;
 };
@@ -127,20 +131,23 @@ void print_grid(std::vector<std::string> &filenames) {
   }
 }
 
-void print_longfmt(std::vector<struct FileInfo> &infos) {
+void print_longfmt(const std::vector<struct FileInfo> &infos) {
   // calculate width
   size_t nlink_width = 0;
   size_t owner_width = 0;
   size_t group_width = 0;
   size_t size_width = 0;
+  blkcnt_t total_blocks = 0;
 
   for (auto &info : infos) {
     nlink_width = std::max(nlink_width, std::to_string(info.nlink).size());
     owner_width = std::max(owner_width, info.owner_name.size());
     group_width = std::max(group_width, info.group_name.size());
     size_width = std::max(size_width, std::to_string(info.size).size());
+    total_blocks += info.blocks;
   }
 
+  fmt::println("total {}", total_blocks);
   for (const auto &info : infos) {
     fmt::println("{} {:>{}} {:<{}}  {:<{}}  {:>{}} {:>12} {}",
                  format_perms(info.perms, info.is_directory), info.nlink,
@@ -149,6 +156,44 @@ void print_longfmt(std::vector<struct FileInfo> &infos) {
                  info.filename);
   }
 }
+
+void print_file_infos(const std::vector<struct FileInfo> &infos,
+                      const LsOptions &opts) {
+  if (opts.long_fmt) {
+    return print_longfmt(infos);
+  }
+
+  std::vector<std::string> filenames;
+  filenames.reserve(infos.size());
+
+  for (const auto &info : infos) {
+    filenames.push_back(info.filename);
+  }
+
+  print_grid(filenames);
+}
+
+struct FileSorter {
+  const LsOptions& opts;
+
+  // Overload () operator, making it can be called like functions
+  bool operator()(const FileInfo& a, const FileInfo& b) {
+    bool result;
+
+    if (opts.sort_time && a.mtime != b.mtime) {
+      result = a.mtime > b.mtime;
+    } else {
+      result = strcoll(a.filename.c_str(), b.filename.c_str()) < 0;
+    }
+
+    return opts.reverse ? !result : result;
+  }
+  
+  bool operator()(const fs::path& a, const fs::path& b) {
+    bool result = strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
+    return opts.reverse ? !result : result;
+  }
+};
 
 void list_directory(const fs::path &path, const LsOptions &opts) {
   std::error_code ec;
@@ -171,6 +216,7 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
     entries.push_back("..");
   }
 
+  // collect entries
   try {
     for (const auto &entry : fs::directory_iterator(path)) {
       std::string filename = entry.path().filename();
@@ -182,7 +228,8 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
 
       entries.push_back(entry.path());
 
-      if (opts.recursive && fs::is_directory(entry.path()) && !fs::is_symlink(entry.path())) {
+      if (opts.recursive && fs::is_directory(entry.path()) &&
+          !fs::is_symlink(entry.path())) {
         subdirs.push_back(entry.path());
       }
     }
@@ -191,45 +238,24 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
     return;
   }
 
-  // print entries
-  // by default, ls sorts file by name
-  std::sort(entries.begin(), entries.end(),
-            [](const fs::path &a, const fs::path &b) {
-              return strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
-            });
-  std::sort(subdirs.begin(), subdirs.end(),
-            [](const fs::path &a, const fs::path &b) {
-              return strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
-            });
+  std::vector<struct FileInfo> infos(entries.size());
 
-  if (!opts.long_fmt) {
-    // short format
-    std::vector<std::string> filenames;
-    filenames.reserve(entries.size());
+  // fill in file info
+  for (int i = 0; i < entries.size(); i++) {
+    fs::path entry = entries[i];
+    struct FileInfo &info = infos[i];
 
-    for (const auto &entry : entries) {
-      filenames.push_back(entry.filename().string());
+    info.filename = entry.filename();
+
+    // get file stat
+    struct stat stat;
+    if (lstat(entry.string().c_str(), &stat) == -1) {
+      perror("lstat");
+      continue;
     }
+    info.mtime = stat.st_mtime;
 
-    print_grid(filenames);
-  } else {
-    // long format
-    std::vector<struct FileInfo> file_infos(entries.size());
-
-    // fill in file info
-    size_t total_blocks = 0;
-    for (int i = 0; i < entries.size(); i++) {
-      fs::path entry = entries[i];
-      struct FileInfo &info = file_infos[i];
-
-      // get file stat
-      info.filename = entry.filename();
-      struct stat stat;
-      if (lstat(entry.string().c_str(), &stat) == -1) {
-        perror("lstat");
-        continue;
-      }
-
+    if (opts.long_fmt) {
       info.is_directory = S_ISDIR(stat.st_mode);
       info.perms = static_cast<fs::perms>(stat.st_mode);
 
@@ -237,6 +263,7 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
       info.uid = stat.st_uid;
       info.gid = stat.st_gid;
       info.size = stat.st_size;
+      info.blocks = stat.st_blocks;
       info.date_str = format_time(stat.st_mtime);
 
       // owner name
@@ -252,17 +279,18 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
         group_cache[info.gid] = gr ? gr->gr_name : std::to_string(info.gid);
       }
       info.group_name = group_cache[info.gid];
-
-      total_blocks += stat.st_blocks;
     }
-
-    fmt::println("total {}", total_blocks);
-    print_longfmt(file_infos);
   }
+
+  // Sort fileinfo
+  std::sort(infos.begin(), infos.end(), FileSorter { opts });
+  print_file_infos(infos, opts);
 
   // Recursive
   if (opts.recursive) {
-    for (const auto& subdir : subdirs) {
+    std::sort(subdirs.begin(), subdirs.end(), FileSorter { opts });
+
+    for (const auto &subdir : subdirs) {
       fmt::println("\n{}:", subdir.string());
       list_directory(subdir, opts);
     }
@@ -288,6 +316,15 @@ int main(int argc, char **argv) {
                "as described in the The Long Format subsection below.");
   app.add_flag("-R,--recursive", opts.recursive,
                "Recursively list subdirectories encountered.");
+  app.add_flag("-r,--reverse", opts.reverse,
+               "Reverse the order of the sort to get reverse collating "
+               "sequence oldest first, or smallest file size first depending "
+               "on the other options given.");
+  app.add_flag("-t", opts.sort_time,
+               "Sort with the primary key being time modified (most "
+               "recently modified first) and the secondary key being "
+               "filename in the collating sequence.");
+
   // positional arguments, targets
   app.add_option("file", opts.targets, "Files or directories to list");
   CLI11_PARSE(app, argc, argv);
