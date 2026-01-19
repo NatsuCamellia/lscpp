@@ -164,6 +164,7 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
 
   // iterate directory
   std::vector<fs::path> entries;
+  std::vector<fs::path> subdirs;
 
   if (opts.all) {
     entries.push_back(".");
@@ -180,6 +181,10 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
       }
 
       entries.push_back(entry.path());
+
+      if (opts.recursive && fs::is_directory(entry.path()) && !fs::is_symlink(entry.path())) {
+        subdirs.push_back(entry.path());
+      }
     }
   } catch (const fs::filesystem_error &err) {
     fmt::println(stdout, "ls: cannot open directory {}", path.string());
@@ -189,6 +194,10 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
   // print entries
   // by default, ls sorts file by name
   std::sort(entries.begin(), entries.end(),
+            [](const fs::path &a, const fs::path &b) {
+              return strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
+            });
+  std::sort(subdirs.begin(), subdirs.end(),
             [](const fs::path &a, const fs::path &b) {
               return strcoll(a.filename().c_str(), b.filename().c_str()) < 0;
             });
@@ -202,54 +211,62 @@ void list_directory(const fs::path &path, const LsOptions &opts) {
       filenames.push_back(entry.filename().string());
     }
 
-    return print_grid(filenames);
+    print_grid(filenames);
+  } else {
+    // long format
+    std::vector<struct FileInfo> file_infos(entries.size());
+
+    // fill in file info
+    size_t total_blocks = 0;
+    for (int i = 0; i < entries.size(); i++) {
+      fs::path entry = entries[i];
+      struct FileInfo &info = file_infos[i];
+
+      // get file stat
+      info.filename = entry.filename();
+      struct stat stat;
+      if (lstat(entry.string().c_str(), &stat) == -1) {
+        perror("lstat");
+        continue;
+      }
+
+      info.is_directory = S_ISDIR(stat.st_mode);
+      info.perms = static_cast<fs::perms>(stat.st_mode);
+
+      info.nlink = stat.st_nlink;
+      info.uid = stat.st_uid;
+      info.gid = stat.st_gid;
+      info.size = stat.st_size;
+      info.date_str = format_time(stat.st_mtime);
+
+      // owner name
+      if (user_cache.find(info.uid) == user_cache.end()) {
+        struct passwd *pw = getpwuid(info.uid);
+        user_cache[info.uid] = pw ? pw->pw_name : std::to_string(info.uid);
+      }
+      info.owner_name = user_cache[info.uid];
+
+      // group name
+      if (group_cache.find(info.gid) == group_cache.end()) {
+        struct group *gr = getgrgid(info.gid);
+        group_cache[info.gid] = gr ? gr->gr_name : std::to_string(info.gid);
+      }
+      info.group_name = group_cache[info.gid];
+
+      total_blocks += stat.st_blocks;
+    }
+
+    fmt::println("total {}", total_blocks);
+    print_longfmt(file_infos);
   }
 
-  // long format
-  std::vector<struct FileInfo> file_infos(entries.size());
-
-  // fill in file info
-  size_t total_blocks = 0;
-  for (int i = 0; i < entries.size(); i++) {
-    fs::path entry = entries[i];
-    struct FileInfo &info = file_infos[i];
-
-    // get file stat
-    info.filename = entry.filename();
-    struct stat stat;
-    if (lstat(entry.string().c_str(), &stat) == -1) {
-      perror("lstat");
-      continue;
+  // Recursive
+  if (opts.recursive) {
+    for (const auto& subdir : subdirs) {
+      fmt::println("\n{}:", subdir.string());
+      list_directory(subdir, opts);
     }
-
-    info.is_directory = S_ISDIR(stat.st_mode);
-    info.perms = static_cast<fs::perms>(stat.st_mode);
-
-    info.nlink = stat.st_nlink;
-    info.uid = stat.st_uid;
-    info.gid = stat.st_gid;
-    info.size = stat.st_size;
-    info.date_str = format_time(stat.st_mtime);
-
-    // owner name
-    if (user_cache.find(info.uid) == user_cache.end()) {
-      struct passwd *pw = getpwuid(info.uid);
-      user_cache[info.uid] = pw ? pw->pw_name : std::to_string(info.uid);
-    }
-    info.owner_name = user_cache[info.uid];
-
-    // group name
-    if (group_cache.find(info.gid) == group_cache.end()) {
-      struct group *gr = getgrgid(info.gid);
-      group_cache[info.gid] = gr ? gr->gr_name : std::to_string(info.gid);
-    }
-    info.group_name = group_cache[info.gid];
-
-    total_blocks += stat.st_blocks;
   }
-
-  fmt::println("total {}", total_blocks);
-  print_longfmt(file_infos);
 }
 
 int main(int argc, char **argv) {
